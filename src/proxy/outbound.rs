@@ -498,9 +498,16 @@ impl OutboundConnection {
                 .state
                 .fetch_network_gateway(gateway, &source, target)
                 .await?;
+            // Apply targetPort remapping from the service's port map.
+            let remapped_port = service
+                .ports
+                .get(&target.port())
+                .copied()
+                .filter(|&p| p > 0)
+                .unwrap_or(target.port());
             let hbone_target_destination = Some(HboneAddress::SvcHostname(
                 service.hostname.clone(),
-                target.port(),
+                remapped_port,
             ));
 
             debug!("built request to a destination on another network through an E/W gateway");
@@ -574,11 +581,30 @@ impl OutboundConnection {
                         .ok_or(Error::NoValidDestination(Box::new(
                             (*waypoint.workload).clone(),
                         )))?;
+                // Apply targetPort remapping from the service's port map.
+                // Without this, the waypoint receives the original service port
+                // (e.g., 80) instead of the backend target port (e.g., 443).
+                let remapped_target = if let Some(&target_port) =
+                    target_service.ports.get(&target.port())
+                {
+                    if target_port > 0 && target_port != target.port() {
+                        debug!(
+                            "service waypoint: remapping port {} -> {} via service targetPort",
+                            target.port(),
+                            target_port
+                        );
+                        SocketAddr::from((target.ip(), target_port))
+                    } else {
+                        target
+                    }
+                } else {
+                    target
+                };
                 debug!("built request to service waypoint proxy");
                 return Ok(Request {
                     protocol: OutboundProtocol::HBONE,
                     source: source_workload,
-                    hbone_target_destination: Some(HboneAddress::SocketAddr(target)),
+                    hbone_target_destination: Some(HboneAddress::SocketAddr(remapped_target)),
                     actual_destination_workload: Some(waypoint.workload),
                     intended_destination_service: Some(ServiceDescription::from(&*target_service)),
                     actual_destination,
